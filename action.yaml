@@ -39,6 +39,11 @@ runs:
         fi
         echo "OIDC_TOKEN=$OIDC_TOKEN" >> $GITHUB_ENV
 
+    - name: Ensure AWS Config Directory Exists
+      shell: bash
+      run: |
+        mkdir -p ~/.aws
+
     - name: Setup AWS Profiles
       shell: bash
       env:
