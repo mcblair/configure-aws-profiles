@@ -14,18 +14,10 @@ inputs:
     required: false
     description: 'Default AWS region to be used if not specified in a profile.'
     default: 'us-west-2'
-  install-yq:
-    required: false
-    description: 'Whether to install yq.'
-    default: 'false'
 
 runs:
   using: "composite"
   steps:
-    - name: Install yq
-      if: inputs.install-deps == 'true'
-      uses: mikefarah/yq@v4.44.3
-
     - name: Get OIDC Token
       shell: bash
       env:
@@ -52,36 +44,45 @@ runs:
       env:
         OIDC_TOKEN: ${{ env.OIDC_TOKEN }}
       run: |
+        set -euo pipefail
         echo "${{ inputs.profiles }}" > profiles.yaml
-        PROFILE_NAMES=$(yq e 'keys' profiles.yaml)
-        for PROFILE_NAME in $(echo "$PROFILE_NAMES" | yq e '.[]' -); do
-          REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
-          ROLE_ARN=$(yq e ".\"$PROFILE_NAME\".role-arn" profiles.yaml)
-          echo "Configuring profile $PROFILE_NAME with region $REGION and role $ROLE_ARN"
+        PROFILE_NAMES=$(yq e 'keys | .[]' profiles.yaml)
+        
+        for PROFILE_NAME in $PROFILE_NAMES; do
+          {
+            REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
+            ROLE_ARN=$(yq e ".\"$PROFILE_NAME\".role-arn" profiles.yaml)
+            echo "Configuring profile $PROFILE_NAME with region $REGION and role $ROLE_ARN"
 
-          # Assume role using AWS CLI with OIDC
-          CREDENTIALS=$(aws sts assume-role-with-web-identity \
-            --role-arn "$ROLE_ARN" \
-            --role-session-name "$PROFILE_NAME" \
-            --web-identity-token "$OIDC_TOKEN" \
-            --duration-seconds 3600 \
-            --region "$REGION" \
-            --output json)
+            # Assume role using AWS CLI with OIDC
+            CREDENTIALS=$(aws sts assume-role-with-web-identity \
+              --role-arn "$ROLE_ARN" \
+              --role-session-name "$PROFILE_NAME" \
+              --web-identity-token "$OIDC_TOKEN" \
+              --duration-seconds 3600 \
+              --region "$REGION" \
+              --output json)
 
-          if [ $? -ne 0 ]; then
-            echo "Error: Failed to assume role $ROLE_ARN"
-            exit 1
-          fi
+            if [ $? -ne 0 ]; then
+              echo "Error: Failed to assume role $ROLE_ARN for profile $PROFILE_NAME" >&2
+              exit 1
+            fi
 
-          export AWS_ACCESS_KEY_ID=$(echo "$CREDENTIALS" | jq -r '.Credentials.AccessKeyId')
-          export AWS_SECRET_ACCESS_KEY=$(echo "$CREDENTIALS" | jq -r '.Credentials.SecretAccessKey')
-          export AWS_SESSION_TOKEN=$(echo "$CREDENTIALS" | jq -r '.Credentials.SessionToken')
+            AWS_ACCESS_KEY_ID=$(echo "$CREDENTIALS" | jq -r '.Credentials.AccessKeyId')
+            AWS_SECRET_ACCESS_KEY=$(echo "$CREDENTIALS" | jq -r '.Credentials.SecretAccessKey')
+            AWS_SESSION_TOKEN=$(echo "$CREDENTIALS" | jq -r '.Credentials.SessionToken')
 
-          aws configure set region "$REGION" --profile "$PROFILE_NAME"
-          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID" --profile "$PROFILE_NAME"
-          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile "$PROFILE_NAME"
-          aws configure set aws_session_token "$AWS_SESSION_TOKEN" --profile "$PROFILE_NAME"
+            aws configure set region "$REGION" --profile "$PROFILE_NAME"
+            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID" --profile "$PROFILE_NAME"
+            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile "$PROFILE_NAME"
+            aws configure set aws_session_token "$AWS_SESSION_TOKEN" --profile "$PROFILE_NAME"
+
+            echo "Successfully configured profile $PROFILE_NAME"
+          } &
         done
+
+        # Wait for all background jobs to finish
+        wait
 
     - name: Reset AWS Environment Variables
       shell: bash
@@ -93,9 +94,21 @@ runs:
     - name: Verify AWS Profiles
       shell: bash
       run: |
+        set -euo pipefail
         echo "${{ inputs.profiles }}" > profiles.yaml
-        PROFILE_NAMES=$(yq e 'keys' profiles.yaml)
-        for PROFILE_NAME in $(echo "$PROFILE_NAMES" | yq e '.[]' -); do
-          echo "Verifying profile $PROFILE_NAME"
-          aws sts get-caller-identity --profile "$PROFILE_NAME"
+        PROFILE_NAMES=$(yq e 'keys | .[]' profiles.yaml)
+        
+        for PROFILE_NAME in $PROFILE_NAMES; do
+          {
+            echo "Verifying profile $PROFILE_NAME"
+            aws sts get-caller-identity --profile "$PROFILE_NAME" >/dev/null
+            if [ $? -ne 0 ]; then
+              echo "Error: Verification failed for profile $PROFILE_NAME" >&2
+              exit 1
+            fi
+            echo "Profile $PROFILE_NAME is valid"
+          } &
         done
+
+        # Wait for all background jobs to finish
+        wait
