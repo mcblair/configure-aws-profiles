@@ -47,42 +47,91 @@ runs:
         set -euo pipefail
         echo "${{ inputs.profiles }}" > profiles.yaml
         PROFILE_NAMES=$(yq e 'keys | .[]' profiles.yaml)
-        
-        for PROFILE_NAME in $PROFILE_NAMES; do
+
+        # Define lock file
+        LOCK_FILE="/tmp/aws_credentials.lock"
+
+        # Array to hold PIDs of background jobs
+        pids=()
+
+        # Function to configure a single profile
+        configure_profile() {
+          local PROFILE_NAME=$1
+          local LOCK_FILE=$2
+
+          REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
+          ROLE_ARN=$(yq e ".\"$PROFILE_NAME\".role-arn" profiles.yaml)
+          echo "Configuring profile $PROFILE_NAME with region $REGION and role $ROLE_ARN"
+
+          # Assume role using AWS CLI with OIDC
+          CREDENTIALS=$(aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "$PROFILE_NAME" \
+            --web-identity-token "$OIDC_TOKEN" \
+            --duration-seconds 3600 \
+            --region "$REGION" \
+            --output json 2>/dev/null)
+
+          if [ $? -ne 0 ] || [ -z "$CREDENTIALS" ]; then
+            echo "Error: Failed to assume role $ROLE_ARN for profile $PROFILE_NAME" >&2
+            exit 1
+          fi
+
+          # Extract credentials
+          AWS_ACCESS_KEY_ID=$(echo "$CREDENTIALS" | jq -r '.Credentials.AccessKeyId')
+          AWS_SECRET_ACCESS_KEY=$(echo "$CREDENTIALS" | jq -r '.Credentials.SecretAccessKey')
+          AWS_SESSION_TOKEN=$(echo "$CREDENTIALS" | jq -r '.Credentials.SessionToken')
+
+          # Acquire file lock before writing to shared files
           {
-            REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
-            ROLE_ARN=$(yq e ".\"$PROFILE_NAME\".role-arn" profiles.yaml)
-            echo "Configuring profile $PROFILE_NAME with region $REGION and role $ROLE_ARN"
+            flock -x 200
 
-            # Assume role using AWS CLI with OIDC
-            CREDENTIALS=$(aws sts assume-role-with-web-identity \
-              --role-arn "$ROLE_ARN" \
-              --role-session-name "$PROFILE_NAME" \
-              --web-identity-token "$OIDC_TOKEN" \
-              --duration-seconds 3600 \
-              --region "$REGION" \
-              --output json)
+            # Write to ~/.aws/credentials
+            cat <<-EOF >> ~/.aws/credentials
+        [$PROFILE_NAME]
+        aws_access_key_id = $AWS_ACCESS_KEY_ID
+        aws_secret_access_key = $AWS_SECRET_ACCESS_KEY
+        aws_session_token = $AWS_SESSION_TOKEN
+        EOF
 
-            if [ $? -ne 0 ]; then
-              echo "Error: Failed to assume role $ROLE_ARN for profile $PROFILE_NAME" >&2
-              exit 1
-            fi
+            # Write to ~/.aws/config
+            cat <<-EOF >> ~/.aws/config
+        [profile $PROFILE_NAME]
+        region = $REGION
+        EOF
 
-            AWS_ACCESS_KEY_ID=$(echo "$CREDENTIALS" | jq -r '.Credentials.AccessKeyId')
-            AWS_SECRET_ACCESS_KEY=$(echo "$CREDENTIALS" | jq -r '.Credentials.SecretAccessKey')
-            AWS_SESSION_TOKEN=$(echo "$CREDENTIALS" | jq -r '.Credentials.SessionToken')
+          } 200>"$LOCK_FILE"
 
-            aws configure set region "$REGION" --profile "$PROFILE_NAME"
-            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID" --profile "$PROFILE_NAME"
-            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile "$PROFILE_NAME"
-            aws configure set aws_session_token "$AWS_SESSION_TOKEN" --profile "$PROFILE_NAME"
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to acquire lock for profile $PROFILE_NAME" >&2
+            exit 1
+          fi
 
-            echo "Successfully configured profile $PROFILE_NAME"
-          } &
+          echo "Successfully configured profile $PROFILE_NAME"
+        }
+
+        export -f configure_profile
+
+        # Iterate over profiles and configure them in parallel
+        for PROFILE_NAME in $PROFILE_NAMES; do
+          configure_profile "$PROFILE_NAME" "$LOCK_FILE" &
+          pids+=($!)
         done
 
-        # Wait for all background jobs to finish
-        wait
+        # Wait for all background jobs to finish and collect their exit statuses
+        exit_code=0
+        for pid in "${pids[@]}"; do
+          if ! wait "$pid"; then
+            echo "Error: A background job (PID $pid) failed." >&2
+            exit_code=1
+          fi
+        done
+
+        # Exit with non-zero code if any job failed
+        if [ "$exit_code" -ne 0 ]; then
+          echo "One or more profile configurations failed." >&2
+          exit 1
+        fi
 
     - name: Reset AWS Environment Variables
       shell: bash
@@ -97,18 +146,44 @@ runs:
         set -euo pipefail
         echo "${{ inputs.profiles }}" > profiles.yaml
         PROFILE_NAMES=$(yq e 'keys | .[]' profiles.yaml)
-        
+
+        # Array to hold PIDs of background jobs
+        pids=()
+
+        # Function to verify a single profile
+        verify_profile() {
+          local PROFILE_NAME=$1
+
+          echo "Verifying profile $PROFILE_NAME"
+
+          # Verify credentials
+          if ! aws sts get-caller-identity --profile "$PROFILE_NAME" >/dev/null 2>&1; then
+            echo "Error: Verification failed for profile $PROFILE_NAME" >&2
+            exit 1
+          fi
+
+          echo "Profile $PROFILE_NAME is valid"
+        }
+
+        export -f verify_profile
+
+        # Iterate over profiles and verify them in parallel
         for PROFILE_NAME in $PROFILE_NAMES; do
-          {
-            echo "Verifying profile $PROFILE_NAME"
-            aws sts get-caller-identity --profile "$PROFILE_NAME" >/dev/null
-            if [ $? -ne 0 ]; then
-              echo "Error: Verification failed for profile $PROFILE_NAME" >&2
-              exit 1
-            fi
-            echo "Profile $PROFILE_NAME is valid"
-          } &
+          verify_profile "$PROFILE_NAME" &
+          pids+=($!)
         done
 
-        # Wait for all background jobs to finish
-        wait
+        # Wait for all background jobs to finish and collect their exit statuses
+        exit_code=0
+        for pid in "${pids[@]}"; do
+          if ! wait "$pid"; then
+            echo "Error: A verification job (PID $pid) failed." >&2
+            exit_code=1
+          fi
+        done
+
+        # Exit with non-zero code if any job failed
+        if [ "$exit_code" -ne 0 ]; then
+          echo "One or more profile verifications failed." >&2
+          exit 1
+        fi
