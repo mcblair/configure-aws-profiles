@@ -1,0 +1,101 @@
+name: Configure AWS Profiles
+
+description: Configures multiple OIDC AWS Role Sessions as AWS config profiles.
+
+branding:
+  icon: 'cloud'
+  color: 'orange'
+
+inputs:
+  profiles:
+    required: true
+    description: 'YAML mapping of profiles to configure.'
+  default-region:
+    required: false
+    description: 'Default AWS region to be used if not specified in a profile.'
+    default: 'us-west-2'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+        sudo wget https://github.com/mikefarah/yq/releases/download/v4.25.3/yq_linux_amd64 -O /usr/local/bin/yq
+        sudo chmod +x /usr/local/bin/yq
+
+    - name: Get OIDC Token
+      shell: bash
+      env:
+        ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+      run: |
+        # Ensure the 'id-token: write' permission is set in your workflow
+        if [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          echo "Error: ACTIONS_ID_TOKEN_REQUEST_TOKEN is not set. Ensure 'id-token: write' permission is granted."
+          exit 1
+        fi
+        # Add audience parameter to the request URL
+        TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com"
+        # Request the OIDC token
+        OIDC_TOKEN=$(curl -sS "$TOKEN_REQUEST_URL" -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" | jq -r '.value')
+        if [ -z "$OIDC_TOKEN" ]; then
+          echo "Error: Failed to retrieve OIDC token."
+          exit 1
+        fi
+        echo "OIDC_TOKEN=$OIDC_TOKEN" >> $GITHUB_ENV
+
+    - name: Setup AWS Profiles
+      shell: bash
+      env:
+        OIDC_TOKEN: ${{ env.OIDC_TOKEN }}
+      run: |
+        echo "${{ inputs.profiles }}" > profiles.yaml
+        PROFILE_NAMES=$(yq e 'keys' profiles.yaml)
+        for PROFILE_NAME in $(echo "$PROFILE_NAMES" | yq e '.[]' -); do
+          REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
+          ROLE_ARN=$(yq e ".\"$PROFILE_NAME\".role-arn" profiles.yaml)
+          echo "Configuring profile $PROFILE_NAME with region $REGION and role $ROLE_ARN"
+
+          # Assume role using AWS CLI with OIDC
+          CREDENTIALS=$(aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "$PROFILE_NAME" \
+            --web-identity-token "$OIDC_TOKEN" \
+            --duration-seconds 3600 \
+            --region "$REGION" \
+            --output json)
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to assume role $ROLE_ARN"
+            exit 1
+          fi
+
+          export AWS_ACCESS_KEY_ID=$(echo "$CREDENTIALS" | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(echo "$CREDENTIALS" | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(echo "$CREDENTIALS" | jq -r '.Credentials.SessionToken')
+
+          aws configure set region "$REGION" --profile "$PROFILE_NAME"
+          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID" --profile "$PROFILE_NAME"
+          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile "$PROFILE_NAME"
+          aws configure set aws_session_token "$AWS_SESSION_TOKEN" --profile "$PROFILE_NAME"
+        done
+
+    - name: Reset AWS Environment Variables
+      shell: bash
+      run: |
+        echo "AWS_ACCESS_KEY_ID=" >> $GITHUB_ENV
+        echo "AWS_SECRET_ACCESS_KEY=" >> $GITHUB_ENV
+        echo "AWS_SESSION_TOKEN=" >> $GITHUB_ENV
+
+    - name: Verify AWS Profiles
+      shell: bash
+      run: |
+        echo "${{ inputs.profiles }}" > profiles.yaml
+        PROFILE_NAMES=$(yq e 'keys' profiles.yaml)
+        for PROFILE_NAME in $(echo "$PROFILE_NAMES" | yq e '.[]' -); do
+          echo "Verifying profile $PROFILE_NAME"
+          aws sts get-caller-identity --profile "$PROFILE_NAME"
+        done
