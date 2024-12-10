@@ -66,6 +66,12 @@ runs:
 
           REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
           ROLE_ARN=$(yq e ".\"$PROFILE_NAME\".role-arn" profiles.yaml)
+
+          if [ -z "$ROLE_ARN" ]; then
+            echo "Error: role-arn is not specified for profile $PROFILE_NAME" >&2
+            exit 1
+          fi
+
           echo "Configuring profile $PROFILE_NAME with region $REGION and role $ROLE_ARN"
 
           # Assume role using AWS CLI with OIDC
@@ -138,13 +144,6 @@ runs:
           exit 1
         fi
 
-    - name: Reset AWS Environment Variables
-      shell: bash
-      run: |
-        echo "AWS_ACCESS_KEY_ID=" >> $GITHUB_ENV
-        echo "AWS_SECRET_ACCESS_KEY=" >> $GITHUB_ENV
-        echo "AWS_SESSION_TOKEN=" >> $GITHUB_ENV
-
     - name: Verify AWS Profiles
       shell: bash
       run: |
@@ -159,10 +158,12 @@ runs:
         verify_profile() {
           local PROFILE_NAME=$1
 
-          echo "Verifying profile $PROFILE_NAME"
+          REGION=$(yq e ".\"$PROFILE_NAME\".region // \"${{ inputs.default-region }}\"" profiles.yaml)
 
-          # Verify credentials
-          if ! aws sts get-caller-identity --profile "$PROFILE_NAME" >/dev/null 2>&1; then
+          echo "Verifying profile $PROFILE_NAME in region $REGION"
+
+          # Verify credentials with explicit region
+          if ! aws sts get-caller-identity --profile "$PROFILE_NAME" --region "$REGION" >/dev/null 2>&1; then
             echo "Error: Verification failed for profile $PROFILE_NAME" >&2
             exit 1
           fi
