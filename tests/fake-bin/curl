@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+output_file=""
+request_url=""
+authorization_header=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    --output)
+      output_file="$2"
+      shift 2
+      ;;
+    --write-out | --connect-timeout | --max-time)
+      shift 2
+      ;;
+    --header)
+      authorization_header="$2"
+      shift 2
+      ;;
+    --silent | --show-error)
+      shift
+      ;;
+    *)
+      request_url="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$output_file" ]]; then
+  echo "fake curl did not receive --output" >&2
+  exit 2
+fi
+
+if [[ "$request_url" != *"audience=sts.amazonaws.com"* ]]; then
+  echo "fake curl did not receive the STS audience" >&2
+  exit 2
+fi
+
+if [[ "$authorization_header" != "Authorization: Bearer test-request-token" ]]; then
+  echo "fake curl did not receive the request token" >&2
+  exit 2
+fi
+
+call_count=0
+if [[ -f "$FAKE_CURL_STATE" ]]; then
+  call_count="$(<"$FAKE_CURL_STATE")"
+fi
+((call_count += 1))
+printf '%s\n' "$call_count" >"$FAKE_CURL_STATE"
+
+case "$FAKE_CURL_SCENARIO:$call_count" in
+  success:*)
+    printf '%s\n' '{"value":"test.oidc.token"}' >"$output_file"
+    printf '200'
+    ;;
+  transient-http:1)
+    printf '%s\n' 'upstream unavailable' >"$output_file"
+    printf '502'
+    ;;
+  transient-http:*)
+    printf '%s\n' '{"value":"test.oidc.token"}' >"$output_file"
+    printf '200'
+    ;;
+  malformed-success:1)
+    printf '%s\n' '<html>temporary proxy response</html>' >"$output_file"
+    printf '200'
+    ;;
+  malformed-success:*)
+    printf '%s\n' '{"value":"test.oidc.token"}' >"$output_file"
+    printf '200'
+    ;;
+  transport-error:1)
+    printf '%s\n' 'connection reset' >&2
+    printf '000'
+    exit 56
+    ;;
+  transport-error:*)
+    printf '%s\n' '{"value":"test.oidc.token"}' >"$output_file"
+    printf '200'
+    ;;
+  permanent-http:*)
+    printf '%s\n' 'unauthorized' >"$output_file"
+    printf '401'
+    ;;
+  exhausted:*)
+    printf '%s\n' 'service unavailable' >"$output_file"
+    printf '503'
+    ;;
+  *)
+    echo "unknown fake curl scenario: $FAKE_CURL_SCENARIO" >&2
+    exit 2
+    ;;
+esac

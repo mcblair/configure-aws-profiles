@@ -23,21 +23,7 @@ runs:
       env:
         ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
         ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
-      run: |
-        # Ensure the 'id-token: write' permission is set in your workflow
-        if [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
-          echo "Error: ACTIONS_ID_TOKEN_REQUEST_TOKEN is not set. Ensure 'id-token: write' permission is granted."
-          exit 1
-        fi
-        # Add audience parameter to the request URL
-        TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com"
-        # Request the OIDC token
-        OIDC_TOKEN=$(curl -sS "$TOKEN_REQUEST_URL" -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" | jq -r '.value')
-        if [ -z "$OIDC_TOKEN" ]; then
-          echo "Error: Failed to retrieve OIDC token."
-          exit 1
-        fi
-        echo "OIDC_TOKEN=$OIDC_TOKEN" >> $GITHUB_ENV
+      run: bash "${{ github.action_path }}/scripts/get-oidc-token.sh"
 
     - name: Ensure AWS Config Directory Exists
       shell: bash

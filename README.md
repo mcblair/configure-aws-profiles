@@ -63,7 +63,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Configure AWS Profiles
-        uses: mcblair/configure-aws-profiles@v0.0.1
+        uses: mcblair/configure-aws-profiles@v0.0.8
         with:
           profiles: |
             dev:
