@@ -36,6 +36,12 @@ The default AWS region to use if not specified in a profile.
 
 - Default: us-west-2
 
+### `duration-seconds` (optional)
+
+The duration, in seconds, of the role session for each profile. The credentials are not refreshed, so they expire this long after the action runs. Each role must allow the duration in its `MaxSessionDuration`; otherwise, assuming the role fails.
+
+- Default: 3600
+
 ## Usage
 
 ### Prerequisites
@@ -63,7 +69,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Configure AWS Profiles
-        uses: mcblair/configure-aws-profiles@v0.0.8
+        uses: mcblair/configure-aws-profiles@v0.0.9
         with:
           profiles: |
             dev:
@@ -72,6 +78,7 @@ jobs:
             prod:
               role-arn: arn:aws:iam::123456789012:role/ProdRole
           default-region: us-west-2
+          duration-seconds: 7200
 
       - name: Use AWS CLI with Dev Profile
         run: aws sts get-caller-identity --profile dev

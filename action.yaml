@@ -14,6 +14,10 @@ inputs:
     required: false
     description: 'Default AWS region to be used if not specified in a profile.'
     default: 'us-west-2'
+  duration-seconds:
+    required: false
+    description: 'Duration, in seconds, of the role session for each profile. Each role must allow this duration in its MaxSessionDuration.'
+    default: '3600'
 
 runs:
   using: "composite"
@@ -65,7 +69,7 @@ runs:
             --role-arn "$ROLE_ARN" \
             --role-session-name "$PROFILE_NAME" \
             --web-identity-token "$OIDC_TOKEN" \
-            --duration-seconds 3600 \
+            --duration-seconds "${{ inputs.duration-seconds }}" \
             --region "$REGION" \
             --output json 2>/dev/null)
 
