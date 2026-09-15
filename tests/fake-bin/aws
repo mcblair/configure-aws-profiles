@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ "${1:-}" != "sts" ]]; then
+  echo "fake aws only supports sts commands" >&2
+  exit 2
+fi
+
+operation="${2:-}"
+shift 2
+
+role_arn=""
+session_name=""
+web_identity_token=""
+duration_seconds=""
+region=""
+profile=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    --role-arn) role_arn="$2"; shift 2 ;;
+    --role-session-name) session_name="$2"; shift 2 ;;
+    --web-identity-token) web_identity_token="$2"; shift 2 ;;
+    --duration-seconds) duration_seconds="$2"; shift 2 ;;
+    --region) region="$2"; shift 2 ;;
+    --profile) profile="$2"; shift 2 ;;
+    --output) shift 2 ;;
+    *)
+      echo "fake aws received an unexpected argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$operation" in
+  assume-role-with-web-identity)
+    if [[ "$web_identity_token" != "test.oidc.token" ]]; then
+      echo "fake aws did not receive the OIDC token" >&2
+      exit 2
+    fi
+
+    printf '%s %s %s %s\n' "$session_name" "$role_arn" "$duration_seconds" "$region" >>"$FAKE_AWS_STATE"
+
+    case "$role_arn" in
+      *Denied*)
+        echo "An error occurred (ValidationError) when calling the AssumeRoleWithWebIdentity operation: The requested DurationSeconds exceeds the MaxSessionDuration set for this role." >&2
+        exit 254
+        ;;
+      *Malformed*)
+        printf '%s\n' '{}'
+        ;;
+      *)
+        printf '{"Credentials":{"AccessKeyId":"AKIA-%s","SecretAccessKey":"secret-%s","SessionToken":"session-%s"}}\n' \
+          "$session_name" "$session_name" "$session_name"
+        ;;
+    esac
+    ;;
+  get-caller-identity)
+    printf '%s %s\n' "$profile" "$region" >>"$FAKE_AWS_STATE"
+
+    case "$profile" in
+      *expired*)
+        echo "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired" >&2
+        exit 254
+        ;;
+      *)
+        printf '{"Account":"123456789012","Arn":"arn:aws:sts::123456789012:assumed-role/Role/%s"}\n' "$profile"
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake aws does not support sts $operation" >&2
+    exit 2
+    ;;
+esac
